@@ -7,12 +7,13 @@ from farm.modeling.prediction_head import TextClassificationHead, TokenClassific
 from farm.modeling.tokenization import Tokenizer
 from farm.infer import Inferencer
 from transformers.pipelines import pipeline
-from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelWithLMHead, \
+from transformers import AutoModelForQuestionAnswering, AutoModelWithLMHead, \
     AutoModelForSequenceClassification, AutoModelForTokenClassification
 import os
 from pathlib import Path
+import pytest
 
-
+@pytest.mark.conversion
 def test_conversion_adaptive_model_qa():
     farm_model = Converter.convert_from_transformers("deepset/bert-base-cased-squad2", device="cpu")
     transformer_model = farm_model.convert_to_transformers()[0]
@@ -21,7 +22,7 @@ def test_conversion_adaptive_model_qa():
     for p1, p2 in zip(transformer_model.parameters(), transformer_model2.parameters()):
         assert (p1.data.ne(p2.data).sum() == 0)
 
-
+@pytest.mark.conversion
 def test_conversion_adaptive_model_lm():
     farm_model = Converter.convert_from_transformers("bert-base-german-cased", device="cpu")
     transformer_model = farm_model.convert_to_transformers()[0]
@@ -30,7 +31,7 @@ def test_conversion_adaptive_model_lm():
     for p1, p2 in zip(transformer_model.parameters(), transformer_model2.parameters()):
         assert (p1.data.ne(p2.data).sum() == 0)
 
-
+@pytest.mark.conversion
 def test_conversion_adaptive_model_classification():
     farm_model = Converter.convert_from_transformers("deepset/bert-base-german-cased-hatespeech-GermEval18Coarse", device="cpu")
     transformer_model = farm_model.convert_to_transformers()[0]
@@ -39,7 +40,7 @@ def test_conversion_adaptive_model_classification():
     for p1, p2 in zip(transformer_model.parameters(), transformer_model2.parameters()):
         assert (p1.data.ne(p2.data).sum() == 0)
 
-
+@pytest.mark.conversion
 def test_conversion_adaptive_model_ner():
     farm_model = Converter.convert_from_transformers("dslim/bert-base-NER", device="cpu")
     transformer_model = farm_model.convert_to_transformers()[0]
@@ -48,7 +49,7 @@ def test_conversion_adaptive_model_ner():
     for p1, p2 in zip(transformer_model.parameters(), transformer_model2.parameters()):
         assert (p1.data.ne(p2.data).sum() == 0)
 
-
+@pytest.mark.conversion
 def test_conversion_inferencer_qa():
     # input
     question = "Why is model conversion important?"
@@ -58,7 +59,8 @@ def test_conversion_inferencer_qa():
     model = "deepset/bert-base-cased-squad2"
     nlp = Inferencer.load(model, task_type="question_answering", num_processes=0)
 
-    assert nlp.processor.tokenizer.basic_tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.is_fast == True
 
     QA_input = [{"questions": [question], "text": text}]
     result_farm = nlp.inference_from_dicts(dicts=QA_input)
@@ -69,6 +71,9 @@ def test_conversion_inferencer_qa():
     farm_model_dir = Path("testsave/bert-conversion-test")
     nlp.save(farm_model_dir)
 
+    # free RAM
+    del nlp
+
     # load from disk in FARM format
     model = AdaptiveModel.load(farm_model_dir, device="cpu")
     tokenizer = Tokenizer.load(farm_model_dir)
@@ -76,11 +81,16 @@ def test_conversion_inferencer_qa():
     # convert to transformers
     transformer_model = Converter.convert_to_transformers(model)[0]
 
+    # free RAM
+    del model
+
     # save it (Note: transformers uses strings rather than Path objects)
     model_dir = "testsave/bert-conversion-test-hf"
     os.makedirs(model_dir, exist_ok=True)
     transformer_model.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
+    del transformer_model
+    del tokenizer
 
     # run predictions (using transformers)
     nlp = pipeline('question-answering', model=model_dir, tokenizer=model_dir)
@@ -90,8 +100,9 @@ def test_conversion_inferencer_qa():
     })
     answer_transformers = result_transformers["answer"]
     assert answer_farm == answer_transformers
+    del nlp
 
-
+@pytest.mark.conversion
 def test_conversion_inferencer_classification():
     # input
     text = "Das ist blöd."
@@ -100,7 +111,8 @@ def test_conversion_inferencer_classification():
     model = "deepset/bert-base-german-cased-hatespeech-GermEval18Coarse"
     nlp = Inferencer.load(model, task_type="text_classification", num_processes=0)
 
-    assert nlp.processor.tokenizer.basic_tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.is_fast == True
 
     input = [{"text": text}]
     result_farm = nlp.inference_from_dicts(dicts=input)
@@ -110,6 +122,7 @@ def test_conversion_inferencer_classification():
     # save it
     farm_model_dir = Path("testsave/bert-conversion-test-hf")
     nlp.save(farm_model_dir)
+    del nlp
 
     # load from disk in FARM format
     model = AdaptiveModel.load(farm_model_dir, device="cpu")
@@ -117,20 +130,24 @@ def test_conversion_inferencer_classification():
 
     # convert to transformers
     transformer_model = Converter.convert_to_transformers(model)[0]
+    del model
 
     # save it (Note: transformers uses strings rather than Path objects)
     model_dir = "testsave/bert-conversion-test-hf"
     os.makedirs(model_dir, exist_ok=True)
     transformer_model.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
+    del transformer_model
+    del tokenizer
 
     # run predictions (using transformers)
     nlp = pipeline('sentiment-analysis', model=model_dir, tokenizer=model_dir)
     result_transformers = nlp(text)
     pred_transformers = result_transformers[0]["label"]
     assert pred_farm == pred_transformers
+    del nlp
 
-
+@pytest.mark.conversion
 def test_conversion_inferencer_ner():
     # input
     text = "Paris is a town in France."
@@ -139,18 +156,20 @@ def test_conversion_inferencer_ner():
     model = "dslim/bert-base-NER"
     nlp = Inferencer.load(model, task_type="ner", num_processes=0)
 
-    assert nlp.processor.tokenizer.basic_tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.do_lower_case == False
+    assert nlp.processor.tokenizer.is_fast == True
 
     input = [{"text": text}]
     result_farm = nlp.inference_from_dicts(dicts=input)
     pred_farm = result_farm[0]["predictions"]
-    assert pred_farm[0]["label"] == 'LOC'
-    assert pred_farm[1]["label"] == 'LOC'
-    assert len(pred_farm) == 2
+    assert pred_farm[0][0]["label"] == 'LOC'
+    assert pred_farm[0][1]["label"] == 'LOC'
+    assert len(pred_farm[0]) == 2
 
     # save it
     farm_model_dir = Path("testsave/bert-conversion-test-hf")
     nlp.save(farm_model_dir)
+    del nlp
 
     # load from disk in FARM format
     model = AdaptiveModel.load(farm_model_dir, device="cpu")
@@ -158,12 +177,15 @@ def test_conversion_inferencer_ner():
 
     # convert to transformers
     transformer_model = Converter.convert_to_transformers(model)[0]
+    del model
 
     # save it (Note: transformers uses strings rather than Path objects)
     model_dir = "testsave/bert-conversion-test-hf"
     os.makedirs(model_dir, exist_ok=True)
     transformer_model.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
+    del transformer_model
+    del tokenizer
 
     # run predictions (using transformers)
     nlp = pipeline('ner', model=model_dir, tokenizer=model_dir)
@@ -171,8 +193,9 @@ def test_conversion_inferencer_ner():
     assert result_transformers[0]["entity"] == 'B-LOC'
     assert result_transformers[1]["entity"] == 'B-LOC'
     assert len(result_transformers) == 2
+    del nlp
 
-
+@pytest.mark.conversion
 def test_multiple_prediction_heads():
     model = "bert-base-german-cased"
     lm = LanguageModel.load(model)
@@ -183,3 +206,6 @@ def test_multiple_prediction_heads():
     transformer_models = Converter.convert_to_transformers(adaptive_model)
     assert isinstance(transformer_models[0], BertForSequenceClassification)
     assert isinstance(transformer_models[1], BertForTokenClassification)
+    del lm
+    del transformer_models
+    del adaptive_model

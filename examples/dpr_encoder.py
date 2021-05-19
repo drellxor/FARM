@@ -45,16 +45,20 @@ def dense_passage_retrieval():
     n_epochs = 3
     distributed = False # enable for multi GPU training via DDP
     evaluate_every = 1000
-    question_lang_model = "facebook/dpr-question_encoder-single-nq-base"
-    passage_lang_model = "facebook/dpr-ctx_encoder-single-nq-base"
+    question_lang_model = "bert-base-uncased"
+    passage_lang_model = "bert-base-uncased"
     do_lower_case = True
     use_fast = True
     embed_title = True
     num_hard_negatives = 1
     similarity_function = "dot_product"
-    train_filename = "nq-train.json"
-    dev_filename = "nq-dev.json"
-    test_filename = "nq-dev.json"
+    # data can be downloaded and unpacked into data_dir:
+    # https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-train.json.gz
+    # https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-dev.json.gz
+    data_dir = "../data/retriever"
+    train_filename = "biencoder-nq-train.json"
+    dev_filename = "biencoder-nq-dev.json"
+    test_filename = "biencoder-nq-dev.json"
     max_samples = None # load a smaller dataset (e.g. for debugging)
 
     # For multi GPU Training via DDP we need to get the local rank
@@ -72,19 +76,19 @@ def dense_passage_retrieval():
     # i.e., nq-train.json, nq-dev.json or trivia-train.json, trivia-dev.json
     label_list = ["hard_negative", "positive"]
     metric = "text_similarity_metric"
-    processor = TextSimilarityProcessor(tokenizer=query_tokenizer,
-                             passage_tokenizer=passage_tokenizer,
-                             max_seq_len_query=64,
-                             max_seq_len_passage=256,
-                             label_list=label_list,
-                             metric=metric,
-                             data_dir="../data/retriever",
-                             train_filename=train_filename,
-                             dev_filename=dev_filename,
-                             test_filename=test_filename,
-                             embed_title=embed_title,
-                             num_hard_negatives=num_hard_negatives,
-                             max_samples=max_samples)
+    processor = TextSimilarityProcessor(query_tokenizer=query_tokenizer,
+                                        passage_tokenizer=passage_tokenizer,
+                                        max_seq_len_query=64,
+                                        max_seq_len_passage=256,
+                                        label_list=label_list,
+                                        metric=metric,
+                                        data_dir=data_dir,
+                                        train_filename=train_filename,
+                                        dev_filename=dev_filename,
+                                        test_filename=test_filename,
+                                        embed_title=embed_title,
+                                        num_hard_negatives=num_hard_negatives,
+                                        max_samples=max_samples)
 
     # 3. Create a DataSilo that loads several datasets (train/dev/test), provides DataLoaders for them and calculates a few descriptive statistics of our datasets
     # NOTE: In FARM, the dev set metrics differ from test set metrics in that they are calculated on a token level instead of a word level
@@ -93,8 +97,8 @@ def dense_passage_retrieval():
 
     # 4. Create an BiAdaptiveModel+
     # a) which consists of 2 pretrained language models as a basis
-    question_language_model = LanguageModel.load(pretrained_model_name_or_path="bert-base-uncased", language_model_class="DPRQuestionEncoder")
-    passage_language_model = LanguageModel.load(pretrained_model_name_or_path="bert-base-uncased", language_model_class="DPRContextEncoder")
+    question_language_model = LanguageModel.load(pretrained_model_name_or_path=question_lang_model, language_model_class="DPRQuestionEncoder")
+    passage_language_model = LanguageModel.load(pretrained_model_name_or_path=passage_lang_model, language_model_class="DPRContextEncoder")
 
 
     # b) and a prediction head on top that is suited for our task => Question Answering

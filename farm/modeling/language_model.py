@@ -34,17 +34,20 @@ from torch import nn
 
 logger = logging.getLogger(__name__)
 
-from transformers.modeling_bert import BertModel, BertConfig
-from transformers.modeling_roberta import RobertaModel, RobertaConfig
-from transformers.modeling_xlnet import XLNetModel, XLNetConfig
-from transformers.modeling_albert import AlbertModel, AlbertConfig
-from transformers.modeling_xlm_roberta import XLMRobertaModel, XLMRobertaConfig
-from transformers.modeling_distilbert import DistilBertModel, DistilBertConfig
-from transformers.modeling_electra import ElectraModel, ElectraConfig
-from transformers.modeling_camembert import CamembertModel, CamembertConfig
-from transformers.modeling_auto import AutoModel, AutoConfig
+from transformers import (
+    BertModel, BertConfig,
+    RobertaModel, RobertaConfig,
+    XLNetModel, XLNetConfig,
+    AlbertModel, AlbertConfig,
+    XLMRobertaModel, XLMRobertaConfig,
+    DistilBertModel, DistilBertConfig,
+    ElectraModel, ElectraConfig,
+    CamembertModel, CamembertConfig
+)
+
+from transformers import AutoModel, AutoConfig
 from transformers.modeling_utils import SequenceSummary
-from transformers.tokenization_bert import load_vocab
+from transformers.models.bert.tokenization_bert import load_vocab
 import transformers
 
 from farm.modeling import wordembedding_utils
@@ -81,7 +84,7 @@ class LanguageModel(nn.Module):
         return model.from_scratch(vocab_size)
 
     @classmethod
-    def load(cls, pretrained_model_name_or_path, n_added_tokens=0, language_model_class=None, **kwargs):
+    def load(cls, pretrained_model_name_or_path, revision=None, n_added_tokens=0, language_model_class=None, **kwargs):
         """
         Load a pretrained language model either by
 
@@ -121,16 +124,25 @@ class LanguageModel(nn.Module):
 
         :param pretrained_model_name_or_path: The path of the saved pretrained model or its name.
         :type pretrained_model_name_or_path: str
+        :param revision: The version of model to use from the HuggingFace model hub. Can be tag name, branch name, or commit hash.
+        :type revision: str
         :param language_model_class: (Optional) Name of the language model class to load (e.g. `Bert`)
         :type language_model_class: str
 
         """
+        kwargs["revision"] = revision
+        logger.info("")
+        logger.info("LOADING MODEL")
+        logger.info("=============")
         config_file = Path(pretrained_model_name_or_path) / "language_model_config.json"
         if os.path.exists(config_file):
+            logger.info(f"Model found locally at {pretrained_model_name_or_path}")
             # it's a local directory in FARM format
             config = json.load(open(config_file))
             language_model = cls.subclasses[config["name"]].load(pretrained_model_name_or_path)
         else:
+            logger.info(f"Could not find {pretrained_model_name_or_path} locally.")
+            logger.info(f"Looking on Transformers Model Hub (in local cache and online)...")
             if language_model_class is None:
                 language_model_class = cls.get_language_model_class(pretrained_model_name_or_path)
 
@@ -147,6 +159,8 @@ class LanguageModel(nn.Module):
                 f"Transformers' model. Here's a list of available models: "
                 f"https://farm.deepset.ai/api/modeling.html#farm.modeling.language_model.LanguageModel.load"
             )
+        else:
+            logger.info(f"Loaded {pretrained_model_name_or_path}")
 
         # resize embeddings in case of custom vocab
         if n_added_tokens != 0:
@@ -311,18 +325,7 @@ class LanguageModel(nn.Module):
             )
         elif len(matches) == 0:
             language = "english"
-            logger.warning(
-                "Could not automatically detect from language model name what language it is. \n"
-                "\t We guess it's an *ENGLISH* model ... \n"
-                "\t If not: Init the language model by supplying the 'language' param."
-            )
         elif len(matches) > 1:
-            logger.warning(
-                "Could not automatically detect from language model name what language it is.\n"
-                f"\t Found multiple matches: {matches}\n"
-                "\t Please init the language model by manually supplying the 'language' as a parameter.\n"
-                f"\t Using {matches[0]} as language parameter for now.\n"
-            )
             language = matches[0]
         else:
             language = matches[0]
@@ -383,7 +386,7 @@ class LanguageModel(nn.Module):
         preds = []
         for vec, sample in zip(vecs, samples):
             pred = {}
-            pred["context"] = sample.tokenized["tokens"]
+            pred["context"] = sample.clear_text["text"]
             pred["vec"] = vec
             preds.append(pred)
         return preds
@@ -1444,16 +1447,23 @@ class DPRQuestionEncoder(LanguageModel):
             dpr_question_encoder.model = transformers.DPRQuestionEncoder.from_pretrained(farm_lm_model, config=dpr_config, **kwargs)
             dpr_question_encoder.language = dpr_question_encoder.model.config.language
         else:
-            model_type = AutoConfig.from_pretrained(pretrained_model_name_or_path).model_type
-            if model_type == "dpr":
+            original_model_config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+            if original_model_config.model_type == "dpr":
                 # "pretrained dpr model": load existing pretrained DPRQuestionEncoder model
                 dpr_question_encoder.model = transformers.DPRQuestionEncoder.from_pretrained(
                     str(pretrained_model_name_or_path), **kwargs)
             else:
                 # "from scratch": load weights from different architecture (e.g. bert) into DPRQuestionEncoder
-                dpr_question_encoder.model = transformers.DPRQuestionEncoder(config=transformers.DPRConfig(**kwargs))
+                # but keep config values from original architecture
+                # TODO test for architectures other than BERT, e.g. Electra
+                if original_model_config.model_type != "bert":
+                    logger.warning(f"Using a model of type '{original_model_config.model_type}' which might be incompatible with DPR encoders."
+                                   f"Bert based encoders are supported that need input_ids,token_type_ids,attention_mask as input tensors.")
+                original_config_dict = vars(original_model_config)
+                original_config_dict.update(kwargs)
+                dpr_question_encoder.model = transformers.DPRQuestionEncoder(config=transformers.DPRConfig(**original_config_dict))
                 dpr_question_encoder.model.base_model.bert_model = AutoModel.from_pretrained(
-                    str(pretrained_model_name_or_path), **kwargs)
+                    str(pretrained_model_name_or_path), **original_config_dict)
             dpr_question_encoder.language = cls._get_or_infer_language_from_name(language, pretrained_model_name_or_path)
 
         return dpr_question_encoder
@@ -1538,16 +1548,25 @@ class DPRContextEncoder(LanguageModel):
             dpr_context_encoder.language = dpr_context_encoder.model.config.language
         else:
             # Pytorch-transformer Style
-            model_type = AutoConfig.from_pretrained(pretrained_model_name_or_path).model_type
-            if model_type == "dpr":
+            original_model_config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+            if original_model_config.model_type == "dpr":
                 # "pretrained dpr model": load existing pretrained DPRContextEncoder model
                 dpr_context_encoder.model = transformers.DPRContextEncoder.from_pretrained(
                     str(pretrained_model_name_or_path), **kwargs)
             else:
                 # "from scratch": load weights from different architecture (e.g. bert) into DPRContextEncoder
-                dpr_context_encoder.model = transformers.DPRContextEncoder(config=transformers.DPRConfig(**kwargs))
+                # but keep config values from original architecture
+                # TODO test for architectures other than BERT, e.g. Electra
+                if original_model_config.model_type != "bert":
+                    logger.warning(
+                        f"Using a model of type '{original_model_config.model_type}' which might be incompatible with DPR encoders."
+                        f"Bert based encoders are supported that need input_ids,token_type_ids,attention_mask as input tensors.")
+                original_config_dict = vars(original_model_config)
+                original_config_dict.update(kwargs)
+                dpr_context_encoder.model = transformers.DPRContextEncoder(
+                    config=transformers.DPRConfig(**original_config_dict))
                 dpr_context_encoder.model.base_model.bert_model = AutoModel.from_pretrained(
-                    str(pretrained_model_name_or_path), **kwargs)
+                    str(pretrained_model_name_or_path), **original_config_dict)
             dpr_context_encoder.language = cls._get_or_infer_language_from_name(language, pretrained_model_name_or_path)
 
         return dpr_context_encoder

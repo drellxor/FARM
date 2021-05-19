@@ -4,14 +4,14 @@ import os
 import numpy as np
 
 from pathlib import Path
-from transformers.modeling_bert import BertForPreTraining, ACT2FN
-from transformers.modeling_auto import AutoModelForQuestionAnswering, AutoModelForTokenClassification, AutoModelForSequenceClassification
+from transformers.models.bert.modeling_bert import BertForPreTraining, ACT2FN
+from transformers import AutoModelForQuestionAnswering, AutoModelForTokenClassification, AutoModelForSequenceClassification
 from typing import List, Tuple
 
 import torch
 from torch import nn
+from torch import optim
 from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss, NLLLoss
-from torch.distributed import all_gather
 from farm.data_handler.utils import is_json
 from farm.utils import convert_iob_to_simple_tags, try_get, all_gather_list
 from farm.modeling.predictions import QACandidate, QAPred
@@ -310,7 +310,7 @@ class TextClassificationHead(PredictionHead):
         self.generate_config()
 
     @classmethod
-    def load(cls, pretrained_model_name_or_path):
+    def load(cls, pretrained_model_name_or_path, revision=None):
         """
         Load a prediction head from a saved FARM or transformers model. `pretrained_model_name_or_path`
         can be one of the following:
@@ -324,6 +324,8 @@ class TextClassificationHead(PredictionHead):
                                               - deepset/bert-base-german-cased-hatespeech-GermEval18Coarse
 
                                               See https://huggingface.co/models for full list
+        :param revision: The version of model to use from the HuggingFace model hub. Can be tag name, branch name, or commit hash.
+        :type revision: str
 
         """
 
@@ -335,7 +337,7 @@ class TextClassificationHead(PredictionHead):
         else:
             # b) transformers style
             # load all weights from model
-            full_model = AutoModelForSequenceClassification.from_pretrained(pretrained_model_name_or_path)
+            full_model = AutoModelForSequenceClassification.from_pretrained(pretrained_model_name_or_path, revision=revision)
             # init empty head
             head = cls(layer_dims=[full_model.config.hidden_size, len(full_model.config.id2label)])
             # transfer weights for head from full model
@@ -573,7 +575,7 @@ class TokenClassificationHead(PredictionHead):
         self.generate_config()
 
     @classmethod
-    def load(cls, pretrained_model_name_or_path):
+    def load(cls, pretrained_model_name_or_path, revision=None):
         """
         Load a prediction head from a saved FARM or transformers model. `pretrained_model_name_or_path`
         can be one of the following:
@@ -598,7 +600,7 @@ class TokenClassificationHead(PredictionHead):
         else:
             # b) transformers style
             # load all weights from model
-            full_model = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path)
+            full_model = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path, revision=revision)
             # init empty head
             head = cls(layer_dims=[full_model.config.hidden_size, len(full_model.config.label2id)])
             # transfer weights for head from full model
@@ -690,44 +692,27 @@ class TokenClassificationHead(PredictionHead):
         probs = self.logits_to_probs(logits, initial_mask,return_class_probs)
 
         # align back with original input by getting the original word spans
-        spans = []
-        for sample, sample_preds in zip(samples, preds):
-            word_spans = []
-            span = None
-            for token, offset, start_of_word in zip(
-                sample.tokenized["tokens"],
-                sample.tokenized["offsets"],
-                sample.tokenized["start_of_word"],
-            ):
-                if start_of_word:
-                    # previous word has ended unless it's the very first word
-                    if span is not None:
-                        word_spans.append(span)
-                    span = {"start": offset, "end": offset + len(token)}
-                else:
-                    # expand the span to include the subword-token
-                    span["end"] = offset + len(token.replace("##", ""))
-            word_spans.append(span)
-            spans.append(word_spans)
-
+        spans = [s.tokenized["word_spans"] for s in samples]
         res = {"task": "ner", "predictions": []}
         for preds_seq, probs_seq, sample, spans_seq in zip(
             preds, probs, samples, spans
         ):
-            tags, spans_seq = convert_iob_to_simple_tags(preds_seq, spans_seq)
+            tags, spans_seq, tag_probs = convert_iob_to_simple_tags(preds_seq, spans_seq, probs_seq)
             seq_res = []
-            for tag, prob, span in zip(tags, probs_seq, spans_seq):
-                context = sample.clear_text["text"][span["start"] : span["end"]]
+            # TODO: Though we filter out tags and spans for non-entity words,
+            # TODO: we do not yet filter out probs of non-entity words. This needs to be implemented still
+            for tag, tag_prob, span in zip(tags, tag_probs, spans_seq):
+                context = sample.clear_text["text"][span[0]: span[1]]
                 seq_res.append(
                     {
-                        "start": span["start"],
-                        "end": span["end"],
+                        "start": span[0],
+                        "end": span[1],
                         "context": f"{context}",
                         "label": f"{tag}",
-                        "probability": prob,
+                        "probability": tag_prob,
                     }
                 )
-            res["predictions"].extend(seq_res)
+            res["predictions"].append(seq_res)
         return res
 
 
@@ -765,7 +750,7 @@ class BertLMHead(PredictionHead):
         self.bias = nn.Parameter(torch.zeros(vocab_size))
 
     @classmethod
-    def load(cls, pretrained_model_name_or_path, n_added_tokens=0):
+    def load(cls, pretrained_model_name_or_path, revision=None, n_added_tokens=0):
         """
         Load a prediction head from a saved FARM or transformers model. `pretrained_model_name_or_path`
         can be one of the following:
@@ -779,6 +764,8 @@ class BertLMHead(PredictionHead):
                                               - bert-base-cased
 
                                               See https://huggingface.co/models for full list
+        :param revision: The version of model to use from the HuggingFace model hub. Can be tag name, branch name, or commit hash.
+        :type revision: str
 
         """
 
@@ -795,7 +782,7 @@ class BertLMHead(PredictionHead):
             # b) pytorch-transformers style
             # load weights from bert model
             # (we might change this later to load directly from a state_dict to generalize for other language models)
-            bert_with_lm = BertForPreTraining.from_pretrained(pretrained_model_name_or_path)
+            bert_with_lm = BertForPreTraining.from_pretrained(pretrained_model_name_or_path, revision=revision)
 
             # init empty head
             vocab_size = bert_with_lm.config.vocab_size + n_added_tokens
@@ -943,7 +930,9 @@ class QuestionAnsweringHead(PredictionHead):
                  no_ans_boost=0.0,
                  context_window_size=100,
                  n_best=5,
-                 n_best_per_sample=1,
+                 n_best_per_sample=None,
+                 duplicate_filtering=-1,
+                 temperature_for_confidence=1.0,
                  **kwargs):
         """
         :param layer_dims: dimensions of Feed Forward block, e.g. [768,2], for adjusting to BERT embedding. Output should be always 2
@@ -961,6 +950,11 @@ class QuestionAnsweringHead(PredictionHead):
                                   This is decoupled from n_best on document level, since predictions on passage level are very similar.
                                   It should have a low value
         :type n_best_per_sample: int
+        :param duplicate_filtering: Answers are filtered based on their position. Both start and end position of the answers are considered.
+                                    The higher the value, answers that are more apart are filtered out. 0 corresponds to exact duplicates. -1 turns off duplicate removal.
+        :type duplicate_filtering: int
+        :param temperature_for_confidence: The divisor that is used to scale logits to calibrate confidence scores
+        :type temperature_for_confidence: float
         """
         super(QuestionAnsweringHead, self).__init__()
         if len(kwargs) > 0:
@@ -977,12 +971,19 @@ class QuestionAnsweringHead(PredictionHead):
         self.no_ans_boost = no_ans_boost
         self.context_window_size = context_window_size
         self.n_best = n_best
-        self.n_best_per_sample = n_best_per_sample
+        if n_best_per_sample:
+            self.n_best_per_sample = n_best_per_sample
+        else:
+            # increasing n_best_per_sample to n_best ensures that there are n_best predictions in total
+            # otherwise this might not be the case for very short documents with only one "sample"
+            self.n_best_per_sample = n_best
+        self.duplicate_filtering = duplicate_filtering
         self.generate_config()
+        self.temperature_for_confidence = nn.Parameter(torch.ones(1) * temperature_for_confidence)
 
 
     @classmethod
-    def load(cls, pretrained_model_name_or_path):
+    def load(cls, pretrained_model_name_or_path, revision=None):
         """
         Load a prediction head from a saved FARM or transformers model. `pretrained_model_name_or_path`
         can be one of the following:
@@ -997,6 +998,8 @@ class QuestionAnsweringHead(PredictionHead):
                                               - bert-large-uncased-whole-word-masking-finetuned-squad
 
                                               See https://huggingface.co/models for full list
+        :param revision: The version of model to use from the HuggingFace model hub. Can be tag name, branch name, or commit hash.
+        :type revision: str
 
         """
 
@@ -1008,7 +1011,7 @@ class QuestionAnsweringHead(PredictionHead):
         else:
             # b) transformers style
             # load all weights from model
-            full_qa_model = AutoModelForQuestionAnswering.from_pretrained(pretrained_model_name_or_path)
+            full_qa_model = AutoModelForQuestionAnswering.from_pretrained(pretrained_model_name_or_path, revision=revision)
             # init empty head
             head = cls(layer_dims=[full_qa_model.config.hidden_size, 2], task_name="question_answering")
             # transfer weights for head from full model
@@ -1023,7 +1026,7 @@ class QuestionAnsweringHead(PredictionHead):
 
         """
         logits = self.feed_forward(X)
-        return logits
+        return self.temperature_scale(logits)
 
     def logits_to_loss(self, logits, labels, **kwargs):
         """
@@ -1055,6 +1058,43 @@ class QuestionAnsweringHead(PredictionHead):
         end_loss = loss_fct(end_logits, end_position)
         per_sample_loss = (start_loss + end_loss) / 2
         return per_sample_loss
+
+
+    def temperature_scale(self, logits):
+        return torch.div(logits, self.temperature_for_confidence)
+
+
+    def calibrate_conf(self, logits, label_all):
+        """
+        Learning a temperature parameter to apply temperature scaling to calibrate confidence scores
+        """
+        logits = torch.cat(logits, dim=0)
+
+        # To handle no_answer labels correctly (-1,-1), we set their start_position to 0. The logit at index 0 also refers to no_answer
+        # TODO some language models do not have the CLS token at position 0. For these models, we need to map start_position==-1 to the index of CLS token
+        start_position = [label[0][0] if label[0][0] >=0 else 0 for label in label_all]
+
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1)
+
+        start_position = torch.tensor(start_position)
+        if len(start_position.size()) > 1:
+            start_position = start_position.squeeze(-1)
+
+        ignored_index = start_logits.size(1)-1
+        start_position.clamp_(0, ignored_index)
+
+        nll_criterion = CrossEntropyLoss()
+
+        optimizer_start = optim.LBFGS([self.temperature_for_confidence], lr=0.01, max_iter=50)
+
+        def eval_start():
+            loss = nll_criterion(self.temperature_scale(start_logits), start_position.to(device=start_logits.device))
+            loss.backward()
+            return loss
+
+        optimizer_start.step(eval_start)
+
 
     def logits_to_preds(self, logits, span_mask, start_of_word,
                         seq_2_start_t, max_answer_length=1000, **kwargs):
@@ -1124,12 +1164,12 @@ class QuestionAnsweringHead(PredictionHead):
         for sample_idx in range(batch_size):
             sample_top_n = self.get_top_candidates(sorted_candidates[sample_idx],
                                                    start_end_matrix[sample_idx],
-                                                   sample_idx)
+                                                   sample_idx, start_matrix=start_matrix[sample_idx])
             all_top_n.append(sample_top_n)
 
         return all_top_n
 
-    def get_top_candidates(self, sorted_candidates, start_end_matrix, sample_idx):
+    def get_top_candidates(self, sorted_candidates, start_end_matrix, sample_idx, start_matrix = None):
         """ Returns top candidate answers as a list of Span objects. Operates on a matrix of summed start and end logits.
         This matrix corresponds to a single sample (includes special tokens, question tokens, passage tokens).
         This method always returns a list of len n_best + 1 (it is comprised of the n_best positive answers along with the one no_answer)"""
@@ -1137,6 +1177,8 @@ class QuestionAnsweringHead(PredictionHead):
         # Initialize some variables
         top_candidates = []
         n_candidates = sorted_candidates.shape[0]
+        start_idx_candidates = set()
+        end_idx_candidates = set()
 
         # Iterate over all candidates and break when we have all our n_best candidates
         for candidate_idx in range(n_candidates):
@@ -1149,23 +1191,36 @@ class QuestionAnsweringHead(PredictionHead):
                 # Ignore no_answer scores which will be extracted later in this method
                 if start_idx == 0 and end_idx == 0:
                     continue
+                if self.duplicate_filtering > -1 and (start_idx in start_idx_candidates or end_idx in end_idx_candidates):
+                    continue
                 score = start_end_matrix[start_idx, end_idx].item()
+                start_matrix_softmax_start = torch.softmax(start_matrix[:, 0], dim=-1)
+                confidence = start_matrix_softmax_start[start_idx].item()
                 top_candidates.append(QACandidate(offset_answer_start=start_idx,
                                                   offset_answer_end=end_idx,
                                                   score=score,
                                                   answer_type="span",
                                                   offset_unit="token",
                                                   aggregation_level="passage",
-                                                  passage_id=sample_idx))
+                                                  passage_id=sample_idx,
+                                                  confidence=confidence))
+                if self.duplicate_filtering > -1:
+                    for i in range(0, self.duplicate_filtering + 1):
+                        start_idx_candidates.add(start_idx + i)
+                        start_idx_candidates.add(start_idx - i)
+                        end_idx_candidates.add(end_idx + i)
+                        end_idx_candidates.add(end_idx - i)
 
         no_answer_score = start_end_matrix[0, 0].item()
+        no_answer_confidence = start_matrix_softmax_start[0].item()
         top_candidates.append(QACandidate(offset_answer_start=0,
                                           offset_answer_end=0,
                                           score=no_answer_score,
                                           answer_type="no_answer",
                                           offset_unit="token",
                                           aggregation_level="passage",
-                                          passage_id=None))
+                                          passage_id=None,
+                                          confidence=no_answer_confidence))
 
         return top_candidates
 
@@ -1211,7 +1266,7 @@ class QuestionAnsweringHead(PredictionHead):
         for pred_d, no_ans_gap, basket in zip(top_preds, no_ans_gaps, baskets):
 
             # Unpack document offsets, clear text and id
-            token_offsets = basket.samples[0].tokenized["document_offsets"]
+            token_offsets = basket.raw["document_offsets"]
             pred_id = basket.id_external if basket.id_external else basket.id_internal
 
             # These options reflect the different input dicts that can be assigned to the basket
@@ -1338,18 +1393,25 @@ class QuestionAnsweringHead(PredictionHead):
         # Initialize variables
         passage_no_answer = []
         passage_best_score = []
+        passage_best_confidence = []
         no_answer_scores = []
+        no_answer_confidences = []
         n_samples = len(preds)
 
         # Iterate over the top predictions for each sample
         for sample_idx, sample_preds in enumerate(preds):
             best_pred = sample_preds[0]
             best_pred_score = best_pred.score
-            no_answer_score = self.get_no_answer_score(sample_preds) + self.no_ans_boost
+            best_pred_confidence = best_pred.confidence
+            no_answer_score, no_answer_confidence = self.get_no_answer_score_and_confidence(sample_preds)
+            no_answer_score += self.no_ans_boost
+            # TODO we might want to apply some kind of a no_ans_boost to no_answer_confidence too
             no_answer = no_answer_score > best_pred_score
             passage_no_answer.append(no_answer)
             no_answer_scores.append(no_answer_score)
+            no_answer_confidences.append(no_answer_confidence)
             passage_best_score.append(best_pred_score)
+            passage_best_confidence.append(best_pred_confidence)
 
         # Get all predictions in flattened list and sort by score
         pos_answers_flat = []
@@ -1361,9 +1423,10 @@ class QuestionAnsweringHead(PredictionHead):
                                                         score=qa_candidate.score,
                                                         answer_type=qa_candidate.answer_type,
                                                         offset_unit="token",
-                                                        aggregation_level="passage",
+                                                        aggregation_level="document",
                                                         passage_id=str(sample_idx),
-                                                        n_passages_in_doc=n_samples)
+                                                        n_passages_in_doc=n_samples,
+                                                        confidence=qa_candidate.confidence)
                                             )
 
         # TODO add switch for more variation in answers, e.g. if varied_ans then never return overlapping answers
@@ -1371,6 +1434,7 @@ class QuestionAnsweringHead(PredictionHead):
 
         # This is how much no_ans_boost needs to change to turn a no_answer to a positive answer (or vice versa)
         no_ans_gap = -min([nas - pbs for nas, pbs in zip(no_answer_scores, passage_best_score)])
+        no_ans_gap_confidence = -min([nas - pbs for nas, pbs in zip(no_answer_confidences, passage_best_confidence)])
 
         # "no answer" scores and positive answers scores are difficult to compare, because
         # + a positive answer score is related to a specific text qa_candidate
@@ -1379,6 +1443,7 @@ class QuestionAnsweringHead(PredictionHead):
         # the most significant difference between scores.
         # Most significant difference: change top prediction from "no answer" to answer (or vice versa)
         best_overall_positive_score = max(x.score for x in pos_answer_dedup)
+        best_overall_positive_confidence = max(x.confidence for x in pos_answer_dedup)
         no_answer_pred = QACandidate(offset_answer_start=-1,
                                      offset_answer_end=-1,
                                      score=best_overall_positive_score - no_ans_gap,
@@ -1386,7 +1451,8 @@ class QuestionAnsweringHead(PredictionHead):
                                      offset_unit="token",
                                      aggregation_level="document",
                                      passage_id=None,
-                                     n_passages_in_doc=n_samples)
+                                     n_passages_in_doc=n_samples,
+                                     confidence=best_overall_positive_confidence - no_ans_gap_confidence)
 
         # Add no answer to positive answers, sort the order and return the n_best
         n_preds = [no_answer_pred] + pos_answer_dedup
@@ -1409,14 +1475,16 @@ class QuestionAnsweringHead(PredictionHead):
 
 
     @staticmethod
-    def get_no_answer_score(preds):
+    def get_no_answer_score_and_confidence(preds):
         for qa_answer in preds:
             start = qa_answer.offset_answer_start
             end = qa_answer.offset_answer_end
             score = qa_answer.score
+            confidence = qa_answer.confidence
             if start == -1 and end == -1:
-                return score
+                return score, confidence
         raise Exception
+
 
     @staticmethod
     def pred_to_doc_idxs(pred, passage_start_t):
@@ -1551,9 +1619,14 @@ class TextSimilarityHead(PredictionHead):
         """
         Calculates dot product similarity scores for two 2-dimensional tensors
 
-        :param query_vectors: tensor of query embeddings from BiAdaptive model of dimension n1 x D, where n1 is the number of queries/batch size and D is embedding size
+        :param query_vectors: tensor of query embeddings from BiAdaptive model
+                        of dimension n1 x D,
+                        where n1 is the number of queries/batch size and D is embedding size
         :type query_vectors: torch.Tensor
-        :param passage_vectors: tensor of context/passage embeddings from BiAdaptive model of dimension n2 x D, where n2 is the number of queries/batch size and D is embedding size
+        :param passage_vectors: tensor of context/passage embeddings from BiAdaptive model
+                        of dimension n2 x D,
+                        where n2 is (batch_size * num_positives) + (batch_size * num_hard_negatives)
+                        and D is embedding size
         :type passage_vectors: torch.Tensor
 
         :return dot_product: similarity score of each query with each context/passage (dimension: n1xn2)
@@ -1573,13 +1646,20 @@ class TextSimilarityHead(PredictionHead):
         :type query_vectors: torch.Tensor
         :param passage_vectors: tensor of context/passage embeddings from BiAdaptive model
                           of dimension n2 x D,
-                          where n2 is the number of queries/batch size and D is embedding size
+                          where n2 is (batch_size * num_positives) + (batch_size * num_hard_negatives)
+                          and D is embedding size
         :type passage_vectors: torch.Tensor
 
         :return: cosine similarity score of each query with each context/passage (dimension: n1xn2)
         """
         # q_vector: n1 x D, ctx_vectors: n2 x D, result n1 x n2
-        return nn.functional.cosine_similarity(query_vectors, passage_vectors, dim=1)
+        cosine_similarities = []
+        passages_per_batch = passage_vectors.shape[0]
+        for query_vector in query_vectors:
+            query_vector_repeated = query_vector.repeat(passages_per_batch, 1)
+            current_cosine_similarities = nn.functional.cosine_similarity(query_vector_repeated, passage_vectors, dim=1)
+            cosine_similarities.append(current_cosine_similarities)
+        return torch.stack(cosine_similarities)
 
     def get_similarity_function(self):
         """
@@ -1629,7 +1709,7 @@ class TextSimilarityHead(PredictionHead):
         softmax_scores = nn.functional.log_softmax(scores, dim=1)
         return softmax_scores
 
-    def logits_to_loss(self, logits: Tuple[torch.Tensor, torch.Tensor], **kwargs):
+    def logits_to_loss(self, logits: Tuple[torch.Tensor, torch.Tensor], label_ids, **kwargs):
         """
         Computes the loss (Default: NLLLoss) by applying a similarity function (Default: dot product) to the input
         tuple of (query_vectors, passage_vectors) and afterwards applying the loss function on similarity scores.
@@ -1649,8 +1729,7 @@ class TextSimilarityHead(PredictionHead):
         query_vectors, passage_vectors = logits
 
         # Prepare Labels
-        lm_label_ids = kwargs.get(self.label_tensor_name)
-        positive_idx_per_question = torch.nonzero((lm_label_ids.view(-1) == 1), as_tuple=False)
+        positive_idx_per_question = torch.nonzero((label_ids.view(-1) == 1), as_tuple=False)
 
         # Gather global embeddings from all distributed nodes (DDP)
         if rank != -1:
@@ -1708,13 +1787,12 @@ class TextSimilarityHead(PredictionHead):
         _, sorted_scores = torch.sort(softmax_scores, dim=1, descending=True)
         return sorted_scores
 
-    def prepare_labels(self, **kwargs):
+    def prepare_labels(self, label_ids, **kwargs):
         """
         Returns a tensor with passage labels(0:hard_negative/1:positive) for each query
 
         :return: passage labels(0:hard_negative/1:positive) for each query
         """
-        label_ids = kwargs.get(self.label_tensor_name)
         labels = torch.zeros(label_ids.size(0), label_ids.numel())
         
         positive_indices = torch.nonzero(label_ids.view(-1) == 1, as_tuple=False)

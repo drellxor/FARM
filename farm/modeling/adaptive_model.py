@@ -8,7 +8,7 @@ import multiprocessing
 import numpy
 import torch
 from torch import nn
-from transformers.configuration_auto import AutoConfig
+from transformers import AutoConfig
 from transformers.convert_graph_to_onnx import convert, quantize as quantize_model
 
 
@@ -455,11 +455,11 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
 
         # Run forward pass of language model
         if extraction_layer == -1:
-            sequence_output, pooled_output = self.language_model(**kwargs, output_all_encoded_layers=False)
+            sequence_output, pooled_output = self.language_model(**kwargs, return_dict=False, output_all_encoded_layers=False)
         else:
             # get output from an earlier layer
             self.language_model.enable_hidden_states_output()
-            sequence_output, pooled_output, all_hidden_states = self.language_model(**kwargs)
+            sequence_output, pooled_output, all_hidden_states = self.language_model(**kwargs, return_dict=False)
             sequence_output = all_hidden_states[extraction_layer]
             pooled_output = None #not available in earlier layers
             self.language_model.disable_hidden_states_output()
@@ -511,7 +511,7 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         return conv.Converter.convert_to_transformers(self)
 
     @classmethod
-    def convert_from_transformers(cls, model_name_or_path, device, task_type=None, processor=None):
+    def convert_from_transformers(cls, model_name_or_path, device, revision=None, task_type=None, processor=None):
         """
         Load a (downstream) model from huggingface's transformers format. Use cases:
          - continue training in FARM (e.g. take a squad QA model and fine-tune on your own data)
@@ -524,6 +524,8 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
                                               - deepset/bert-large-uncased-whole-word-masking-squad2
 
                                               See https://huggingface.co/models for full list
+        :param revision: The version of model to use from the HuggingFace model hub. Can be tag name, branch name, or commit hash.
+        :type revision: str
         :param device: "cpu" or "cuda"
         :param task_type: One of :
                           - 'question_answering'
@@ -534,7 +536,11 @@ class AdaptiveModel(nn.Module, BaseAdaptiveModel):
         :type processor: Processor
         :return: AdaptiveModel
         """
-        return conv.Converter.convert_from_transformers(model_name_or_path, device, task_type, processor)
+        return conv.Converter.convert_from_transformers(model_name_or_path,
+                                                        revision=revision,
+                                                        device=device,
+                                                        task_type=task_type,
+                                                        processor=processor)
 
 
     @classmethod
@@ -636,6 +642,7 @@ class ONNXAdaptiveModel(BaseAdaptiveModel):
 
     @classmethod
     def load(cls, load_dir, device, **kwargs):
+        load_dir = Path(load_dir)
         import onnxruntime
         sess_options = onnxruntime.SessionOptions()
         # Set graph optimization level to ORT_ENABLE_EXTENDED to enable bert optimization.

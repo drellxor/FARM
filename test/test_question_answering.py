@@ -8,7 +8,7 @@ from farm.modeling.adaptive_model import AdaptiveModel
 from farm.infer import QAInferencer
 from farm.data_handler.inputs import QAInput, Question
 
-@pytest.mark.parametrize("distilbert_squad", [True, False], indirect=True)
+
 def test_training(distilbert_squad, caplog=None):
     if caplog:
         caplog.set_level(logging.CRITICAL)
@@ -18,7 +18,6 @@ def test_training(distilbert_squad, caplog=None):
     assert type(processor) == SquadProcessor
 
 
-@pytest.mark.parametrize("distilbert_squad", [True, False], indirect=True)
 def test_save_load(distilbert_squad, caplog=None):
     if caplog:
         caplog.set_level(logging.CRITICAL)
@@ -33,24 +32,22 @@ def test_save_load(distilbert_squad, caplog=None):
     assert inferencer is not None
 
 
-@pytest.mark.parametrize("bert_base_squad2", [True, False], indirect=True)
-def test_inference_dicts(bert_base_squad2):
+def test_inference_different_inputs(bert_base_squad2):
     qa_format_1 = [
         {
             "questions": ["Who counted the game among the best ever made?"],
             "text": "Twilight Princess was released to universal critical acclaim and commercial success. It received perfect scores from major publications such as 1UP.com, Computer and Video Games, Electronic Gaming Monthly, Game Informer, GamesRadar, and GameSpy. On the review aggregators GameRankings and Metacritic, Twilight Princess has average scores of 95% and 95 for the Wii version and scores of 95% and 96 for the GameCube version. GameTrailers in their review called it one of the greatest games ever created."
         }]
-    qa_format_2 = [{"qas":["Who counted the game among the best ever made?"],
-                 "context": "Twilight Princess was released to universal critical acclaim and commercial success. It received perfect scores from major publications such as 1UP.com, Computer and Video Games, Electronic Gaming Monthly, Game Informer, GamesRadar, and GameSpy. On the review aggregators GameRankings and Metacritic, Twilight Princess has average scores of 95% and 95 for the Wii version and scores of 95% and 96 for the GameCube version. GameTrailers in their review called it one of the greatest games ever created.",
-                }]
+    q = Question(text="Who counted the game among the best ever made?")
+    qa_format_2 = QAInput(questions=[q],doc_text= "Twilight Princess was released to universal critical acclaim and commercial success. It received perfect scores from major publications such as 1UP.com, Computer and Video Games, Electronic Gaming Monthly, Game Informer, GamesRadar, and GameSpy. On the review aggregators GameRankings and Metacritic, Twilight Princess has average scores of 95% and 95 for the Wii version and scores of 95% and 96 for the GameCube version. GameTrailers in their review called it one of the greatest games ever created.")
+
 
     result1 = bert_base_squad2.inference_from_dicts(dicts=qa_format_1)
-    result2 = bert_base_squad2.inference_from_dicts(dicts=qa_format_2)
+    result2 = bert_base_squad2.inference_from_objects(objects=[qa_format_2])
     assert result1 == result2
 
 
 @pytest.fixture()
-@pytest.mark.parametrize("bert_base_squad2", [True, False], indirect=True)
 def span_inference_result(bert_base_squad2, caplog=None):
     if caplog:
         caplog.set_level(logging.CRITICAL)
@@ -61,7 +58,6 @@ def span_inference_result(bert_base_squad2, caplog=None):
 
 
 @pytest.fixture()
-@pytest.mark.parametrize("bert_base_squad2", [True, False], indirect=True)
 def no_answer_inference_result(bert_base_squad2, caplog=None):
     if caplog:
         caplog.set_level(logging.CRITICAL)
@@ -86,13 +82,13 @@ def test_span_performance(span_inference_result, caplog=None):
 
     assert best_pred.answer == "GameTrailers"
 
-    best_score_gold = 11.7282
+    best_score_gold = 13.4205
     best_score = best_pred.score
-    assert isclose(best_score, best_score_gold, rel_tol=0.0001)
+    assert isclose(best_score, best_score_gold, rel_tol=0.001)
 
-    no_answer_gap_gold = 12.6491
+    no_answer_gap_gold = 13.9827
     no_answer_gap = span_inference_result.no_answer_gap
-    assert isclose(no_answer_gap, no_answer_gap_gold, rel_tol=0.0001)
+    assert isclose(no_answer_gap, no_answer_gap_gold, rel_tol=0.001)
 
 
 def test_no_answer_performance(no_answer_inference_result, caplog=None):
@@ -102,13 +98,13 @@ def test_no_answer_performance(no_answer_inference_result, caplog=None):
 
     assert best_pred.answer == "no_answer"
 
-    best_score_gold = 15.8022
+    best_score_gold = 12.1445
     best_score = best_pred.score
-    assert isclose(best_score, best_score_gold, rel_tol=0.0001)
+    assert isclose(best_score, best_score_gold, rel_tol=0.001)
 
-    no_answer_gap_gold = -15.0159
+    no_answer_gap_gold = -14.4646
     no_answer_gap = no_answer_inference_result.no_answer_gap
-    assert isclose(no_answer_gap, no_answer_gap_gold, rel_tol=0.0001)
+    assert isclose(no_answer_gap, no_answer_gap_gold, rel_tol=0.001)
 
 
 def test_qa_pred_attributes(span_inference_result, caplog=None):
@@ -144,9 +140,90 @@ def test_id(span_inference_result, no_answer_inference_result):
     assert no_answer_inference_result.id == "best_id_ever"
 
 
+def test_duplicate_answer_filtering(bert_base_squad2):
+    qa_input = [
+        {
+            "questions": ["“In what country lies the Normandy?”"],
+            "text": """The Normans (Norman: Nourmands; French: Normands; Latin: Normanni) were the people who in the 10th and 11th centuries gave their name to Normandy, a region in France. They were descended from Norse (\"Norman\" comes from \"Norseman\") 
+                raiders and pirates from Denmark, Iceland and Norway who, under their leader Rollo, agreed to swear fealty to King Charles III of West Francia. Through generations of assimilation and mixing with the native Frankish and Roman-Gaulish populations, their descendants would gradually merge with the Carolingian-based cultures of West Francia. 
+                The distinct cultural and ethnic identity of the Normans emerged initially in the first half of the 10th century, and it continued to evolve over the succeeding centuries. Weird things happen in Normandy, France."""
+        }]
+
+    bert_base_squad2.model.prediction_heads[0].n_best = 5
+    bert_base_squad2.model.prediction_heads[0].n_best_per_sample = 5
+    bert_base_squad2.model.prediction_heads[0].duplicate_filtering = 0
+
+    result = bert_base_squad2.inference_from_dicts(dicts=qa_input)
+    offset_answer_starts = []
+    offset_answer_ends = []
+    for answer in result[0]["predictions"][0]["answers"]:
+        offset_answer_starts.append(answer["offset_answer_start"])
+        offset_answer_ends.append(answer["offset_answer_end"])
+
+    assert len(offset_answer_starts) == len(set(offset_answer_starts))
+    assert len(offset_answer_ends) == len(set(offset_answer_ends))
+
+
+def test_no_duplicate_answer_filtering(bert_base_squad2):
+    qa_input = [
+        {
+            "questions": ["“In what country lies the Normandy?”"],
+            "text": """The Normans (Norman: Nourmands; French: Normands; Latin: Normanni) were the people who in the 10th and 11th centuries gave their name to Normandy, a region in France. They were descended from Norse (\"Norman\" comes from \"Norseman\") 
+                    raiders and pirates from Denmark, Iceland and Norway who, under their leader Rollo, agreed to swear fealty to King Charles III of West Francia. Through generations of assimilation and mixing with the native Frankish and Roman-Gaulish populations, their descendants would gradually merge with the Carolingian-based cultures of West Francia. 
+                    The distinct cultural and ethnic identity of the Normans emerged initially in the first half of the 10th century, and it continued to evolve over the succeeding centuries. Weird things happen in Normandy, France."""
+        }]
+
+    bert_base_squad2.model.prediction_heads[0].n_best = 5
+    bert_base_squad2.model.prediction_heads[0].n_best_per_sample = 5
+    bert_base_squad2.model.prediction_heads[0].duplicate_filtering = -1
+
+    result = bert_base_squad2.inference_from_dicts(dicts=qa_input)
+    offset_answer_starts = []
+    offset_answer_ends = []
+    for answer in result[0]["predictions"][0]["answers"]:
+        offset_answer_starts.append(answer["offset_answer_start"])
+        offset_answer_ends.append(answer["offset_answer_end"])
+
+    assert len(offset_answer_starts) != len(set(offset_answer_starts))
+    assert len(offset_answer_ends) != len(set(offset_answer_ends))
+
+
+def test_range_duplicate_answer_filtering(bert_base_squad2):
+    qa_input = [
+        {
+            "questions": ["“In what country lies the Normandy?”"],
+            "text": """The Normans (Norman: Nourmands; French: Normands; Latin: Normanni) were the people who in the 10th and 11th centuries gave their name to Normandy, a region in France. They were descended from Norse (\"Norman\" comes from \"Norseman\") 
+                    raiders and pirates from Denmark, Iceland and Norway who, under their leader Rollo, agreed to swear fealty to King Charles III of West Francia. Through generations of assimilation and mixing with the native Frankish and Roman-Gaulish populations, their descendants would gradually merge with the Carolingian-based cultures of West Francia. 
+                    The distinct cultural and ethnic identity of the Normans emerged initially in the first half of the 10th century, and it continued to evolve over the succeeding centuries. Weird things happen in Normandy, France."""
+        }]
+
+    bert_base_squad2.model.prediction_heads[0].n_best = 5
+    bert_base_squad2.model.prediction_heads[0].n_best_per_sample = 5
+    bert_base_squad2.model.prediction_heads[0].duplicate_filtering = 5
+
+    result = bert_base_squad2.inference_from_dicts(dicts=qa_input)
+    offset_answer_starts = []
+    offset_answer_ends = []
+    for answer in result[0]["predictions"][0]["answers"]:
+        offset_answer_starts.append(answer["offset_answer_start"])
+        offset_answer_ends.append(answer["offset_answer_end"])
+
+    offset_answer_starts.sort()
+    offset_answer_starts.remove(0)
+    distances_answer_starts = [j-i for i, j in zip(offset_answer_starts[:-1],offset_answer_starts[1:])]
+    assert all(distance > bert_base_squad2.model.prediction_heads[0].duplicate_filtering for distance in distances_answer_starts)
+
+    offset_answer_ends.sort()
+    offset_answer_ends.remove(0)
+    distances_answer_ends = [j-i for i, j in zip(offset_answer_ends[:-1], offset_answer_ends[1:])]
+    assert all(distance > bert_base_squad2.model.prediction_heads[0].duplicate_filtering for distance in distances_answer_ends)
+
+
 if(__name__=="__main__"):
     test_training()
     test_save_load()
-    test_inference_dicts()
+    test_inference_different_inputs()
     test_inference_objs()
-
+    test_duplicate_answer_filtering()
+    test_no_duplicate_answer_filtering()
+    test_range_duplicate_answer_filtering()
