@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from flask import Flask, request, make_response
 from flask_cors import CORS
-from flask_restplus import Api, Resource
+from flask_restx import Api, Resource
 
 from farm.infer import Inferencer
 

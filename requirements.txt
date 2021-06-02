@@ -22,9 +22,8 @@ transformers==4.5.0
 # accessing dictionary elements with dot notation
 dotmap
 # for inference-rest-apis
-Werkzeug==0.16.1
 flask
-flask-restplus
+flask-restx
 flask-cors
 dill # pickle extension for (de-)serialization
 # optional for inference
