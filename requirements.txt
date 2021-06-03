@@ -22,9 +22,9 @@ transformers==4.5.0
 # accessing dictionary elements with dot notation
 dotmap
 # for inference-rest-apis
-flask
-flask-restx
-flask-cors
+# flask
+# flask-restx
+# flask-cors
 dill # pickle extension for (de-)serialization
 # optional for inference
 #fasttext==0.9.1
